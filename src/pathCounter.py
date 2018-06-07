@@ -8,6 +8,7 @@ from datetime import datetime
 import threading
 import copy
 import logging
+import txtReader
 
 from _pybgpstream import BGPStream, BGPRecord, BGPElem
 
@@ -25,12 +26,14 @@ def dt2ts(dt):
     return (dt - datetime(1970, 1, 1)).total_seconds()
 
 
+
 class pathCounter(threading.Thread):
 
     def __init__(self, starttime, endtime, announceQueue, countQueue, ribQueue, 
             spatialResolution=1, af=4, timeWindow=900, #asnFilter=None, 
             collectors=[ "route-views.linx", "route-views3", "rrc00", "rrc10"],
-            includedPeers=[], excludedPeers=[], includedOrigins=[], excludedOrigins=[]):
+            includedPeers=[], excludedPeers=[], includedOrigins=[], excludedOrigins=[], 
+            onlyFullFeed=True, txtFile=None):
 
         threading.Thread.__init__ (self)
         self.__nbaddr = {4:{i: 2**(32-i) for i in range(33) }, 6: {i: 2**(128-i) for i in range(129) }}
@@ -62,17 +65,23 @@ class pathCounter(threading.Thread):
         self.peers = None
         self.peersASN = defaultdict(set) 
         self.peersPerASN = defaultdict(list)
+        self.onlyFullFeed = onlyFullFeed
 
         self.counter = {
                 "all": pathCountDict(),
                 "origas": defaultdict(pathCountDict),
                 }
 
+        self.txtFile = txtFile
+
 
     def run(self):
         logging.info("Reading RIB files...")
         self.readrib()
-        self.peers = self.findFullFeeds()
+        if self.onlyFullFeed: 
+            self.peers = self.findFullFeeds(0.75)
+        else:
+            self.peers = self.findFullFeeds(0)
         self.peersASN = {p:self.peersASN[p] for p in self.peers} 
         for p, a in self.peersASN.iteritems():
             if len(a)>1:
@@ -105,8 +114,8 @@ class pathCounter(threading.Thread):
         else:
             return self.findParent(parent, zOrig)
 
-    def findFullFeeds(self):
-        logging.debug("(pathCounter) finding full feed peers...")
+    def findFullFeeds(self, threshold):
+        # logging.debug("(pathCounter) finding full feed peers...")
         nbPrefixes = defaultdict(int)
         nodes = self.rtree.nodes()
 
@@ -114,8 +123,8 @@ class pathCounter(threading.Thread):
             for peer in node.data.keys():
                 nbPrefixes[peer] += 1
 
-        res = set([peer for peer, nbPfx in nbPrefixes.iteritems() if nbPfx>len(nodes)*0.75])
-        logging.debug("(pathCounter) %s full feed peers" % len(res))
+        res = set([peer for peer, nbPfx in nbPrefixes.iteritems() if nbPfx>len(nodes)*threshold])
+        logging.debug("(pathCounter) Using %s peers out of %s (threshold=%s)" % (len(res), len(nbPrefixes), threshold))
 
         return res
 
@@ -177,43 +186,52 @@ class pathCounter(threading.Thread):
 
 
     def readrib(self):
-        # create a new bgpstream instance
-        stream = BGPStream()
-        # create a reusable bgprecord instance
-        rec = BGPRecord()
-        bgprFilter = "type ribs"
+        stream = None
+        rec = None
+        if self.txtFile is None:
+            # create a new bgpstream instance
+            stream = BGPStream()
 
-        if self.af == 6:
-            bgprFilter += " and ipversion 6"
+            # create a reusable bgprecord instance
+            rec = BGPRecord()
+            bgprFilter = "type ribs"
+
+            if self.af == 6:
+                bgprFilter += " and ipversion 6"
+            else:
+                bgprFilter +=  " and ipversion 4"
+
+            for c in self.collectors:
+                bgprFilter += " and collector %s " % c
+
+            # if not self.asnFilter is None:
+                # bgprFilter += ' and path %s$' % self.asnFilter
+            for p in self.includedPeers:
+                bgprFilter += " and peer %s " % p
+
+            for p in self.includedPrefix:
+                bgprFilter += " and prefix more %s " % p
+
+            
+            logging.info("Connecting to BGPstream... (%s)" % bgprFilter)
+            logging.info("Timestamps: %s, %s" % (self.startts-3600, self.startts+3600))
+            stream.parse_filter_string(bgprFilter)
+            stream.add_interval_filter(self.startts-3600, self.startts+3600)
+            if self.livemode:
+                stream.set_live_mode()
+
+            stream.start()
+
         else:
-            bgprFilter +=  " and ipversion 4"
+            rec = txtReader.txtReader(self.txtFile)
 
-        for c in self.collectors:
-            bgprFilter += " and collector %s " % c
-
-        # if not self.asnFilter is None:
-            # bgprFilter += ' and path %s$' % self.asnFilter
-        for p in self.includedPeers:
-            bgprFilter += " and peer %s " % p
-
-        for p in self.includedPrefix:
-            bgprFilter += " and prefix more %s " % p
-
-        
-        logging.info("Connecting to BGPstream... (%s)" % bgprFilter)
-        logging.info("Timestamps: %s, %s" % (self.startts-3600, self.startts+3600))
-        stream.parse_filter_string(bgprFilter)
-        stream.add_interval_filter(self.startts-3600, self.startts+3600)
-        if self.livemode:
-            stream.set_live_mode()
-
-        stream.start()
         # for line in p1.stdout: 
-        while(stream.get_next_record(rec)):
+        while(self.txtFile and not rec.running ) or (stream and stream.get_next_record(rec)):
             if rec.status  != "valid":
                 print rec.project, rec.collector, rec.type, rec.time, rec.status
             zDt = rec.time
             elem = rec.get_next_elem()
+
             while(elem):
                 zOrig = elem.peer_address
                 zAS = elem.peer_asn
@@ -255,6 +273,8 @@ class pathCounter(threading.Thread):
 
                 node.data[zOrig] = {"path": set(path), "count": 0, "origAS":origAS}
 
+                # print "%s, %s, %s, %s, %s" % (elem.time, elem.type, elem.peer_address, elem.peer_asn, elem.fields)
+
                 if self.spatialResolution:
                     # compute weight for this path
                     count = self.nbIPs(node.prefixlen)
@@ -287,6 +307,10 @@ class pathCounter(threading.Thread):
                 elem = rec.get_next_elem()
 
     def readupdates(self):
+        #TODO implement txt file for update messages?
+        if self.txtFile:
+            return
+
         # create a new bgpstream instance
         stream = BGPStream()
         bgprFilter = "type updates"
@@ -307,7 +331,7 @@ class pathCounter(threading.Thread):
             # bgprFilter += ' and (path %s$ or elemtype withdrawals)' % self.asnFilter
         
         logging.info("Connecting to BGPstream... (%s)" % bgprFilter)
-        logging.info("Timestamps: %s, %s" % (self.starts, selft.endts))
+        logging.info("Timestamps: %s, %s" % (self.startts, self.endts))
         stream.parse_filter_string(bgprFilter)
         stream.add_interval_filter(self.startts, self.endts)
         if self.livemode:

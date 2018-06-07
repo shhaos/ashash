@@ -5,11 +5,11 @@ You will need to install the following python libraries to use this code:
 
 - Python 2.7
 - py-radix: https://pypi.python.org/pypi/py-radix
-- pybgpstream (from source): https://github.com/caida/bgpstream
+- pybgpstream v1.2: https://github.com/caida/bgpstream
 - apsw: https://pypi.python.org/pypi/apsw
 
 ## Example
-As an example, we look at AS hegemony changes during the Comcast outage caused by Level(3) BGP route leak on Nov. 11th, 2017.
+As an example, we look at AS hegemony changes during the Comcast outage caused by Level(3) BGP route leak on Nov. 6th, 2017.
 
 The first step is to fetch corresponding BGP data and compute AS hegemony for this dataset. This may consumes a lot of RAM memory as we need to maintain the RIBs of all analyzed BGP peers. For this example, we employ only one BGP collector, route-views3, that accounts for 17 full feed BGP peers. You'll need about 12GB of free memory to run the following command:
 
@@ -29,6 +29,29 @@ The plot is available in the ./Comcast_20171107_rv3/ folder, and should look lik
 ![Level3 BGP route leak](http://ihr.iijlab.net/static/ihr/AS33667_localHegemony.png)
 
 The bump in Level(3) hegemony (AS3356) at 18:00 UTC reveals the BGP route leak that lasted for about 90 minutes.
+
+## Reading local text files
+
+### File Format
+Instead of getting data from BGPStream you can also provide your own BGP data in a text file.
+For now the file should have no header and the format should similar to libBGPdump output, that is:
+```
+BGP version|message time|message type|peer IP address|peer ASN|prefix|AS path|origin|next hop|local preferences|MED|communities| aggregate ID|aggregate IP 
+```
+Note that actually ashash is using only the fields peer IP address, peer ASN, prefix, and AS path.
+The file [data/uniTokyo_20151010.data](data/uniTokyo_20151010.data) shows an example of text file with this format.
+
+### Command Line
+To pass a text file to ashash use the option "-f".
+For example:
+```
+python2 src/ashash.py -o ./testTXT/ -f data/uniTokyo_20151010.data 2018-01-01T00:00 2018-01-01T00:00
+```
+
+### Limitations
+- For now the filters are not implemented for text inputs. You should filter out by yourself undesirable data before executing ashash.
+- Similarly timestamps in the file are ignored and the mandatory start and end time from the command line are not used. 
+- The input text file is considered as a RIB file. That means ashash reads all messages from the file then compute hegemony only once.
 
 ## Online Results
 Results from Jan 2004 are available through a REST API on http://ihr.iijlab.net/api/doc. These results are monthly updated, and we are planning to make them hourly available.
